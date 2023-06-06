@@ -1,35 +1,29 @@
-import pandas as pd
-import numpy as np
+import re
 
-# parameters
-EMBEDDING_MODEL = "text-embedding-ada-002"
+def parse_response(text):
+    pattern = r"\[IMAGE\]\{(.+)\}"
+    matches = re.findall(pattern, text)
+    image_descriptions = iter(matches)
+    print([i for i in image_descriptions])
+    result = {"data": []}
+    parts = re.split(pattern, text)
+    print([i for i in parts])
 
-# load data
-datafile_path = "data/fine_food_reviews_with_embeddings_1k.csv"
+    for part in parts:
+        if part in matches:
+            if len(part) > 1:
+                result["data"].append({"type": "image", "content": part})
+        elif part:
+            if len(part) > 1:
+                result["data"].append({"type": "text", "content": part})
 
-df = pd.read_csv(datafile_path)
-df["embedding"] = df.embedding.apply(eval).apply(np.array)
+    return result
 
-# convert 5-star rating to binary sentiment
-df = df[df.Score != 3]
-df["sentiment"] = df.Score.replace({1: "negative", 2: "negative", 4: "positive", 5: "positive"})
+print(parse_response("""Конечно! Гориллы - это крупные приматы, которые обитают в тропических лесах и горах Африки. Они являются одними из ближайших родственников человека и обладают сходными чертами, такими как большой размер мозга и социальная организация.
 
-from openai.embeddings_utils import cosine_similarity, get_embedding
+Гориллы делятся на два вида: восточные гориллы и западные гориллы. Восточные гориллы обитают в Восточной Африке, а западные гориллы - в Западной Африке. Они оба находятся под угрозой их вымирания из-за потери мест обитания и браконьерства.
 
+Вот две фотографии горилл для вас:
 
-def evaluate_embeddings_approach(
-        labels=['negative', 'positive'],
-        model=EMBEDDING_MODEL,
-):
-    label_embeddings = [get_embedding(label, engine=model) for label in labels]
-
-    def label_score(review_embedding, label_embeddings):
-        return cosine_similarity(review_embedding, label_embeddings[1]) - cosine_similarity(review_embedding,
-                                                                                            label_embeddings[0])
-
-    probas = df["embedding"].apply(lambda x: label_score(x, label_embeddings))
-    preds = probas.apply(lambda x: 'positive' if x > 0 else 'negative')
-
-
-
-evaluate_embeddings_approach(labels=['negative', 'positive'], model=EMBEDDING_MODEL)
+[IMAGE]{A photo of a male silverback gorilla sitting on a rock and looking off into the distance}
+[IMAGE]{A photo of a mother gorilla with her baby clinging to her back as they walk through the forest}"""))
