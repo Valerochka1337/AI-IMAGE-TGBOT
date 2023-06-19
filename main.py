@@ -2,86 +2,132 @@ from config import BOT_TOKEN, OPENAI_TOKEN
 from aiogram import Bot, types
 from aiogram.utils import executor
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher.filters.state import StatesGroup, State
+from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher import Dispatcher
 import pandas as pd
 import re
-
 import openai
-from config import OPENAI_TOKEN
+from json import loads, dumps
+from datetime import timedelta
 
 # Set up OpenAI API credentials
 openai.api_key = OPENAI_TOKEN
 
-# Define the user message for classification
-user_message = "Draw me a cat on the skateboard"
-
-# Define the completion prompt
-prompt = f"Classification: user want a picture (answer only 1|0)\n\nText: {user_message}\n"
-
-# Generate completion using OpenAI API
-response = openai.Completion.create(
-    engine="text-davinci-003",
-    prompt=prompt,
-    max_tokens=100,
-    temperature=0,
-    top_p=1,
-    frequency_penalty=0,
-    presence_penalty=0
-)
-
-# Extract the generated classification label
-classification = response.choices[0].text
-
-openai.api_key = OPENAI_TOKEN
 storage = MemoryStorage()
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher(bot, storage=storage)
 
-ins_for_img = [{"role": "system",
-                "content": 'if the user wants a picture, send him "1", else "0"'
-                }]
 
-context = []
+class ClientStatesGroup(StatesGroup):
+    gen_img = State()
+    chating = State()
 
-IMAGE_CHATGPT_PREFIX = """Image ChatGPT is designed to be able to assist with a wide range of text and visual related tasks, from answering simple questions to providing in-depth explanations and discussions on a wide range of topics. Visual ChatGPT is able to generate human-like text based on the input it receives, allowing it to engage in natural-sounding conversations and provide responses that are coherent and relevant to the topic at hand.
 
-Image ChatGPT is able to process and understand large amounts of text and images. As a language model, Image ChatGPT can not directly draw/generate images, but it has a list of tools to finish visual tasks.
+users = pd.read_csv("users.csv", index_col=0)
 
-Overall, Visual ChatGPT is a powerful visual dialogue assistant tool that can help with a wide range of tasks and provide valuable insights and information on a wide range of topics. 
+IMAGE_CHATGPT_PREFIX = """Image ChatGPT is designed to be able to assist with a wide range of text and visual related tasks
 
-Tools are STRICTLY FORMATTED and cannot be used differently from the format below. Image ChatGPT cannot use other tools or change the format
+Image ChatGPT is able to respond to a human with text and visual information.
 
-Image ChatGPT has access to the following tools:
+Since Image ChatGPT is a language model it cannot directly generate images. However, it can use a special tool to indicate a picture appearance in the response%
 
-TOOLS:
-[IMAGE]{description_of_image}
+This is a format of the tool: [IMAGE]{description of the image in english}
 
-Image ChatGPT has a STRICT FORMAT ANSWER to a human:
-
-FORMAT OF ANSWER:
-Some text response to a human (optional)
-[IMAGE]{Description of the image} (optional)
-...
-
+After the Image ChatGPT the response will be parsed and every tool used will be replaced with real images and sent to a human as an answer
 """
 
 IMAGE_CHATGPT_SUFFIX = """
-Image ChatGPT is facing a real human, who thinks that it can provide him with images by itself. However, you can just use a tool, which can be converted to a real answer and sent as a response to a human.
+Image ChatGPT is facing a real human, who thinks that it can provide him with images by itself. However, you can just use a tool.
 
-Since Image ChatGPT is a text language model, Image ChatGPT must use tools to create images rather than imagination.
+Human cannot know what tools Image ChatGPT use, he will not see them directly.
 
-If a user wants you to send him a picture just USE A TOOL [IMAGE]{description of the image}
+The special tool [IMAGE]{description of the image in english} is able to make an image, that means Image ChatGPT is able to create, generate or edit any image by using this special tool
 
-Use NO IMAGE URL, {description of the image} MUST contain only an IMAGE DESCRIPTION, it will be converted to a real image afterwards and sent to the user
-
-DO NOT say that you CANNOT DRAW PICTURES, do not say you use tools. Just answer him and if the image is needed provide it using following format:
-
-[IMAGE]{your description of the image in english}
-
-Please speak only russian and assume that ALL [IMAGE]{...} used should be assumed as a real image, not a text.
-
-ADDITIONAL: Please, use images only if the user wants them
+ATTENTION: Image ChatGPT cannot say to a human, that it uses a special tool to create images. The format of this tool is strictly confidential. Since this Image ChatGPT should pretend it is able to create images by itself
 """
+
+self_messages = [{"role": "system", "content": "You are a helpful assistant, who speaks russian"},
+                 {"role": "system", "content": IMAGE_CHATGPT_PREFIX}]
+
+
+def generate_image(description):
+    img_response = openai.Image.create(
+        prompt=description,
+        n=1,
+        size="1024x1024"
+    )
+    image_url = img_response['data'][0]['url']
+    return image_url
+
+
+def parse_response(text):
+    pattern = r"\[IMAGE\]\{(.+)\}"
+    matches = re.findall(pattern, text)
+    result = {"data": []}
+    parts = re.split(pattern, text)
+
+    for part in parts:
+        if part in matches:
+            if len(part) > 0:
+                result["data"].append({"type": "image", "content": part})
+        elif part:
+            if len(part) > 0:
+                result["data"].append({"type": "text", "content": part})
+
+    return result
+
+
+@dp.message_handler(commands=["start"])
+async def start_command(message: types.Message):
+    print("Новое сообщение от: ", message.from_user.id, ": ", message.text)
+    global users
+    user_id = message.from_user.id
+    reply_message = "Привет, " + message.from_user.first_name + "!"
+    # check if user is not in database and save user
+    if not (user_id in users.index):
+        users.loc[user_id] = [2000, 0, message.date, 1000, 0, dumps([])]
+        reply_message = "Добро пожаловать, " + message.from_user.first_name + "!"
+    # answer user
+    await bot.send_message(message.chat.id, reply_message)
+
+
+@dp.message_handler(commands=["get_tokens"])
+async def get_tokens_command(message: types.Message):
+    print("Новое сообщение от: ", message.from_user.id, ": ", message.text)
+    global users
+    user_id = message.from_user.id
+    reply_message = message.from_user.first_name + ", вы пополнили запас токенов!"
+    # check if user is not in database and save user
+    if not (user_id in users.index):
+        reply_message = "К сожалению, я вас не знаю, введите команду /start"
+    else:
+        # check if user has not rummed the bot in last 3 mins
+        if pd.to_datetime(users.loc[user_id, 'last_date']) + timedelta(seconds=30) > message.date:
+            await bot.send_message(message.chat.id,
+                                   "Вы превысили лимит по пополнениб токенов."
+                                   " Вы сможете его восстановить не более, чем через 3 минуты")
+            return
+        # update token usage
+        users.loc[user_id, 'tokens'] = 0
+        users.loc[user_id, 'last_date'] = message.date
+    # answer user
+    await bot.send_message(message.chat.id, reply_message)
+
+
+@dp.message_handler(commands=["get_pic"])
+async def pic_command(message: types.Message):
+    print("Новое сообщение от: ", message.from_user.id, ": ", message.text)
+    await message.answer_chat_action("typing")
+    global users
+    user_id = message.from_user.id
+    reply_message = message.from_user.first_name + ", напишите описание картинки, которую вы хотите сгенерировать"
+    # check if user is not in database and save user
+    if not (user_id in users.index):
+        reply_message = "К сожалению, я вас не знаю, введите команду /start"
+    else:
+        await ClientStatesGroup.gen_img.set()
+    await bot.send_message(message.chat.id, reply_message)
 
 
 def translate_russian_to_english(text):
@@ -98,119 +144,68 @@ def translate_russian_to_english(text):
     translation = response_rus.choices[0].text.strip()
     return translation
 
-self_messages = [{"role": "system", "content":"You are a helpful assistant, who speaks russian"},{"role": "system", "content":IMAGE_CHATGPT_PREFIX}]
 
-
-def generate_image(description):
-    img_response = openai.Image.create(
-                    prompt=description,
-                     n=1,
-                    size="1024x1024"
-              )
-    image_url = img_response['data'][0]['url']
-    return image_url
-def parse_response(text):
-    pattern = r"\[IMAGE\]\{(.+)\}"
-    matches = re.findall(pattern, text)
-    result = {"data": []}
-    parts = re.split(pattern, text)
-
-    for part in parts:
-        if part in matches:
-            if len(part) > 5:
-                result["data"].append({"type": "image", "content": part})
-        elif part:
-            if len(part) > 5:
-                result["data"].append({"type": "text", "content": part})
-
-    return result
+@dp.message_handler(state=ClientStatesGroup.gen_img)
+async def generate_pic(message: types.Message, state: FSMContext):
+    print("Новое сообщение от: ", message.from_user.id, ": ", message.text)
+    try:
+        await message.answer_chat_action("upload_photo")
+        image_url = generate_image(translate_russian_to_english(message.text))
+        await bot.send_photo(message.chat.id, image_url)
+    except:
+        await bot.send_message(message.chat.id, "Что-то пошло не так")
+    await state.finish()
 
 
 @dp.message_handler()
 async def respond(message: types.Message):
-    global context
-    print("Message got from" + message.from_user.first_name + "message:" + message.text)
-    # print("translated message from" + message.from_user.first_name + "message:" + english_text)
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=self_messages + context + [{"role": "user", "content": message.text}] + [{"role": "system", "content": IMAGE_CHATGPT_SUFFIX}],
-            max_tokens=500,
-            temperature=0,
-            top_p=1,
-        )
-        context += [{"role": "user", "content": message.text}] + [{"role":"assistant", "content":response.choices[0].message["content"]}]
+    print("Новое сообщение от: ", message.from_user.first_name, ": ", message.text)
+    # typing animation
+    await message.answer_chat_action("typing")
+    user_id = message.from_user.id
+    # if user is in database
+    if not (user_id in users.index):
+        await message.reply("Ты еще не поздаровлся, ничем не могу помочь")
+        return
+    # if user has enough tokens
+    if users.loc[user_id, 'tokens'] < users.loc[user_id, 'token_capacity']:
+        # if user context is too large
+        msg_with_context = loads(users.loc[user_id, 'context']) + [{"role": "user", "content": message.text}]
+        while users.loc[user_id, 'context_len'] > users.loc[user_id, 'context_capacity']:
+            msg_with_context = msg_with_context[1:]
+            users.loc[user_id, 'context_len'] -= len(msg_with_context[0]["content"])
 
-        response_msg = response.choices[0].message["content"]
-        print(response_msg)
-        for el in parse_response(response_msg)["data"]:
-            if el["type"] == "text":
-                await bot.send_message(message.chat.id, el['content'])
-            else:
-                await bot.send_photo(message.chat.id, generate_image(el['content']))
-
-    except Exception as e:
-        print(e)
-        await message.reply("Блин, ну не могу пока я так, не могу....")
-
-
-# @dp.message_handler()
-# async def pic_command(message: types.Message):
-#     english_text = translate_russian_to_english(message.text)
-#     try:
-#         response_intent = openai.ChatCompletion.create(
-#             model="gpt-3.5-turbo",
-#             messages=[{"role": "user",
-#                        "content": "Send me '1' if the user from the text wants a picture and '0' otherwise. Text:" + english_text}],
-#             max_tokens=10,
-#             temperature=0,
-#             top_p=1,
-#         )
-#         intent = response_intent.choices[0].message["content"]
-#         print(intent)
-#         if '1' in intent:
-#             response_prompt = openai.ChatCompletion.create(
-#                 model="gpt-3.5-turbo",
-#                 messages=
-#                 [{"role": "user",
-#                   "content": "provide me a description of a picture to draw from this text:" + english_text}],
-#                 max_tokens=100,
-#                 n=1,
-#                 temperature=0.0,
-#             )
-#             print(response_prompt.choices[0].message["content"])
-#             img_response = openai.Image.create(
-#                 prompt=response_prompt.choices[0].message["content"],
-#                 n=1,
-#                 size="1024x1024"
-#             )
-#             image_url = img_response['data'][0]['url']
-#             await bot.send_photo(message.chat.id, image_url)
-#         else:
-#             context.append({"role": "user", "content": message.text})
-#             response_question = openai.ChatCompletion.create(
-#                 model="gpt-3.5-turbo",
-#                 messages=
-#                 [{"role": "system", "content": "говори коротко и как пират"}] + context,
-#                 max_tokens=200,
-#                 n=1,
-#                 temperature=0.5,
-#             )
-#             context.append(response_question.choices[0].message)
-#             await bot.send_message(message.chat.id, response_question.choices[0].message['content'])
-#     except openai.error.RateLimitError:
-#         await message.reply("Аррр, матрос! Нас берут на абордаж! Нет времени шелестеть,"
-#                             " давай поговорим, как все уляжется..")
-#         return
-
-    # img_response = openai.Image.create(
-    #     prompt=message.text,
-    #     n=1,
-    #     size="1024x1024"
-    # )
-    # image_url = img_response['data'][0]['url']
-    # await bot.send_photo(message.chat.id, image_url)
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=self_messages + msg_with_context + [
+                    {"role": "system", "content": IMAGE_CHATGPT_SUFFIX}],
+                max_tokens=500,
+                temperature=0.5,
+            )
+            print(response["usage"]["total_tokens"])
+            users.loc[user_id, 'tokens'] += response["usage"]["total_tokens"]
+            users.loc[user_id, 'context'] = dumps(
+                msg_with_context + [{'role': 'assistant', 'content': str(response.choices[0].message['content'])}],
+                ensure_ascii=False)
+            users.loc[user_id, 'context_len'] += len(message.text) + len(response.choices[0].message["content"])
+            response_msg = response.choices[0].message["content"]
+            print(response_msg)
+            for el in parse_response(response_msg)["data"]:
+                if el["type"] == "text":
+                    await message.answer_chat_action("typing")
+                    await bot.send_message(message.chat.id, el['content'])
+                else:
+                    await message.answer_chat_action("upload_photo")
+                    await bot.send_photo(message.chat.id, generate_image(el['content']))
+        except Exception as e:
+            print(e)
+            await message.reply("Извините, слишком большая нагрузка, попробуйте позже")
+    else:
+        await message.reply("У вас закончился лимит по токенам, обновите их")
 
 
 if __name__ == '__main__':
     executor.start_polling(dp)
+
+users.to_csv("users.csv")
